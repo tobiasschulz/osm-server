@@ -1,0 +1,58 @@
+Installiere ein Debian chroot zum kompilieren:
+
+  apt install debootstrap
+  debootstrap --arch=amd64 jessie /opt/compile-chroot
+
+In der /etc/fstab:
+
+  proc /opt/compile-chroot/proc proc defaults 0 0
+  sysfs /opt/compile-chroot/sys sysfs defaults 0 0
+
+Dann im chroot zum kompilieren folgendes ausführen:
+
+  chroot /opt/compile-chroot
+  apt-get install sudo git g++ cmake libboost-dev libboost-filesystem-dev libboost-thread-dev libboost-system-dev libboost-regex-dev libstxxl-dev libxml2-dev libsparsehash-dev libbz2-dev zlib1g-dev libzip-dev libgomp1 liblua5.1-0-dev libluabind-dev pkg-config libgdal-dev libboost-program-options-dev libboost-iostreams-dev libboost-test-dev libtbb-dev libexpat1-dev
+  cd
+  wget https://github.com/Project-OSRM/osrm-backend/archive/v5.4.0.tar.gz
+  tar xvf v5.4.0.tar.gz
+  cd osrm-backend-5.4.0/
+  mkdir -p build
+  cd build
+  cmake .. -DENABLE_LTO=OFF
+  make
+  checkinstall
+
+Das Debian-Paket für den Produktiv-Server befindet sich dann im Ordner "/opt/compile-chroot/root/osrm-backend-5.4.0/build/".
+Es hat folgende Abhängigkeiten:
+  apt-get install libboost-date-time1.55.0 libboost-program-options1.55.0 libluabind0.9.1 libstxxl1 libtbb2
+
+Danach chroot löschen:
+  umount /opt/compile-chroot/proc
+  umount /opt/compile-chroot/sys
+  rm -rf /opt/compile-chroot
+
+Danach:
+  mkdir /mnt/ssd/osrm/
+
+Dateiinhalt von /mnt/ssd/osrm/setup.sh:
+
+  #!/bin/bash
+  export EXTRACT=hessen-latest
+  export LC_ALL=C
+
+  killall osrm-routed 2>/dev/null
+  killall -9 osrm-routed 2>/dev/null
+  cd /mnt/ssd/osrm/
+
+  # prepare database
+  test -f ${EXTRACT}.osrm.nodes || (
+        echo "prepare database... $(echo -n $(date))"
+        rsync -avP /mnt/hdd/download/${EXTRACT}.osm.pbf ${EXTRACT}.osm.pbf
+        osrm-extract -p /etc/osrm/profiles/car.lua ${EXTRACT}.osm.pbf
+        #osrm-extract -p /mnt/ssd/osrm/osrm-backend-master/profiles/car.lua ${EXTRACT}.osm.pbf
+        osrm-contract  ${EXTRACT}.osrm
+        echo "prepare database done. $(echo -n $(date))"
+  )
+
+  # run server on port 5000
+  osrm-routed ${EXTRACT}.osrm

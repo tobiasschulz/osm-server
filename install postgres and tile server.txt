@@ -1,0 +1,286 @@
+apt install libboost-all-dev subversion git-core tar unzip wget bzip2 build-essential autoconf libtool libxml2-dev libgeos-dev libgeos++-dev libpq-dev libbz2-dev libproj-dev munin-node munin libprotobuf-c0-dev protobuf-c-compiler libfreetype6-dev libpng12-dev libtiff4-dev libicu-dev libgdal-dev libcairo-dev libcairomm-1.0-dev apache2 apache2-dev libagg-dev liblua5.2-dev ttf-unifont lua5.1 liblua5.1-dev libgeotiff-epsg node-carto checkinstall
+
+  ohne compiler-tools:
+
+apt install apache2 tar unzip wget bzip2 sudo
+
+
+symlinks:
+
+ln -sf /mnt/ssd/map-style/ /usr/local/share/maps/style
+ln -sf /mnt/hdd/download/ /usr/local/share/maps/planet
+ln -sf /mnt/hdd/mod_tile_cache/ /var/lib/mod_tile
+ln -sf /mnt/ssd/postgresql/ /var/lib/postgresql
+
+
+
+
+
+# ----- setup postgres
+
+apt install postgresql postgresql-contrib postgis postgresql-9.4-postgis-2.1
+
+sudo -u postgres -i
+createuser osm # answer yes for superuser
+createdb -E UTF8 -O osm gis
+exit
+
+sudo useradd -m osm
+sudo passwd osm       # duhanezy
+
+sudo -u postgres psql
+\c gis
+CREATE EXTENSION postgis;
+CREATE EXTENSION hstore;
+ALTER TABLE geometry_columns OWNER TO "osm";
+ALTER TABLE spatial_ref_sys OWNER TO "osm";
+\q
+exit
+
+
+
+# ----- setup osm2pgsql
+
+mkdir ~/src
+cd ~/src
+git clone git://github.com/openstreetmap/osm2pgsql.git
+cd osm2pgsql
+./autogen.sh
+./configure
+make
+sudo make install
+sudo checkinstall        # build debian package
+
+
+# ----- setup mapnik
+
+cd ~/src
+git clone git://github.com/mapnik/mapnik
+cd mapnik
+git branch 2.3 origin/2.3.x
+git checkout 2.3
+
+python scons/scons.py configure INPUT_PLUGINS=all OPTIMIZATION=3 SYSTEM_FONTS=/usr/share/fonts/truetype/
+make
+sudo make install
+sudo ldconfig
+sudo checkinstall        # build debian package
+
+  Verify that Mapnik has been installed correctly:
+
+python
+>>> import mapnik
+>>>
+
+
+
+# ----- setup mod_tile and renderd
+
+cd ~/src
+git clone git://github.com/openstreetmap/mod_tile.git
+cd mod_tile
+./autogen.sh
+./configure
+make
+sudo make install
+sudo make install-mod_tile
+sudo ldconfig
+sudo checkinstall        # build debian package
+
+
+
+# ----- setup OSMBright
+
+    To begin with, we need to download both the OSM Bright stylesheet, and also the additional data resources it uses (for coastlines and the like).
+
+sudo mkdir -p /usr/local/share/maps/style
+sudo chown osm /usr/local/share/maps/style
+cd /usr/local/share/maps/style
+wget https://github.com/mapbox/osm-bright/archive/master.zip
+wget http://data.openstreetmapdata.com/simplified-land-polygons-complete-3857.zip
+wget http://data.openstreetmapdata.com/land-polygons-split-3857.zip
+mkdir ne_10m_populated_places_simple
+cd ne_10m_populated_places_simple
+wget http://www.naturalearthdata.com/http//www.naturalearthdata.com/download/10m/cultural/ne_10m_populated_places_simple.zip
+unzip ne_10m_populated_places_simple.zip
+rm ne_10m_populated_places_simple.zip
+cd ..
+
+    We then move the downloaded data into the osm-bright-master project directory:
+
+unzip '*.zip'
+mkdir osm-bright-master/shp
+mv land-polygons-split-3857 osm-bright-master/shp/
+mv simplified-land-polygons-complete-3857 osm-bright-master/shp/
+mv ne_10m_populated_places_simple osm-bright-master/shp/
+
+    To improve performance, we create index files for the larger shapefiles:
+
+cd osm-bright-master/shp/land-polygons-split-3857
+shapeindex land_polygons.shp
+cd ../simplified-land-polygons-complete-3857/
+shapeindex simplified_land_polygons.shp
+cd ../..
+
+
+# ----- configure OSMBright
+
+    The OSM Bright stylesheet now needs to be adjusted to include the location of our data files.
+    Edit the file osm-bright/osm-bright.osm2pgsql.mml in your favourite text editor, for example:
+
+nano osm-bright/osm-bright.osm2pgsql.mml
+
+    Find the lines with URLs pointing to shapefiles (ending .zip) and replace each one with these appropriate pairs of lines:
+
+"file": "/usr/local/share/maps/style/osm-bright-master/shp/land-polygons-split-3857/land_polygons.shp", 
+"type": "shape"
+"file": "/usr/local/share/maps/style/osm-bright-master/shp/simplified-land-polygons-complete-3857/simplified_land_polygons.shp", 
+"type": "shape",
+"file": "/usr/local/share/maps/style/osm-bright-master/shp/ne_10m_populated_places_simple/ne_10m_populated_places_simple.shp", 
+"type": "shape"
+
+    Note that we are also adding “type”: “shape” to each one. (If you’re using nano, to save, now press ctrl-X and Y.)
+
+    Finally, in the section dealing with “ne_places”, replace the “srs” and “srs-name” lines with this one line:
+
+"srs": "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+
+
+# ----- compile OSMBright
+    
+    We now have a fully working CartoCSS stylesheet.
+    Before Mapnik can use it, we need to compile it into XML using the command-line carto compiler.
+    First of all, we use OSM Bright’s own preprocessor, which we need to edit for our setup:
+
+cp configure.py.sample configure.py
+nano configure.py
+
+    Changes:
+    - change the config line pointing to ~/Documents/Mapbox/project to /usr/local/share/maps/style instead
+    - change "dbname" from "osm" to "gis"
+    Save and exit.
+
+    Run the pre-processor and then carto:
+
+./make.py
+cd ../OSMBright/
+carto project.mml > OSMBright.xml
+
+
+# ----- setup webserver
+
+    Change the the renderd settings by editing the /usr/local/etc/renderd.conf 
+    and change the following five lines, uncommenting (removing the ‘;’) when required.
+    They are found in the [renderd], [mapnik] and [default] sections.
+
+socketname=/var/run/renderd/renderd.sock
+plugins_dir=/usr/local/lib/mapnik/input
+font_dir=/usr/share/fonts/truetype
+XML=/usr/local/share/maps/style/OSMBright/OSMBright.xml
+HOST=localhost
+
+    Create the files required for the mod_tile system to run:
+
+mkdir /var/run/renderd
+chown osm /var/run/renderd
+mkdir /var/lib/mod_tile
+chown osm /var/lib/mod_tile
+
+    Using your favourite text editor, create the file /etc/apache2/conf-available/mod_tile.conf and add one line:
+
+LoadModule tile_module /usr/lib/apache2/modules/mod_tile.so
+
+    Modify the file /etc/apache2/sites-available/000-default.conf to include the following lines immediately after the admin e-mail address line:
+
+LoadTileConfigFile /usr/local/etc/renderd.conf
+ModTileRenderdSocketName /var/run/renderd/renderd.sock
+# Timeout before giving up for a tile to be rendered
+ModTileRequestTimeout 0
+# Timeout before giving up for a tile to be rendered that is otherwise missing
+ModTileMissingRequestTimeout 30
+
+    Tell Apache that you have added the new module, and restart it:
+
+a2enconf mod_tile
+service apache2 restart
+
+
+
+
+# ----- import data
+
+mkdir /usr/local/share/maps/planet
+chown osm /usr/local/share/maps/planet
+cd /usr/local/share/maps/planet 
+wget http://download.geofabrik.de/europe-latest.osm.pbf
+
+osm2pgsql --slim -d gis -C 16000 --number-processes 3 /usr/local/share/maps/planet/europe-latest.osm.pbf
+
+
+
+
+
+# ----- configure tile server
+
+mkdir /var/run/renderd
+chown osm /var/run/renderd
+
+
+
+
+# ----- test tile server
+
+sudo -u osm renderd -f -c /usr/local/etc/renderd.conf
+
+    and on a different session:
+
+service apache2 restart
+
+    If any FATAL errors occur you’ll need to double-check any edits that you made earlier.
+
+
+
+# ----- setup tile server to run automatically
+
+cp  ~/src/mod_tile/debian/renderd.init /etc/init.d/renderd
+chmod u+x /etc/init.d/renderd
+
+    Edit the /etc/init.d/renderd file as root:
+
+DAEMON=/usr/local/bin/$NAME
+DAEMON_ARGS="-c /usr/local/etc/renderd.conf"
+export _SYSTEMCTL_SKIP_REDIRECT=1   ###### IMPORTANT!
+RUNASUSER=osm
+
+    Then:
+
+ln -s /etc/init.d/renderd /etc/rc2.d/S20renderd
+
+
+Done!
+
+
+
+
+
+# ----- IMPORT NEUE LÄNDER
+
+Wichtig !!! Immer als User "osm" ausführen !
+
+# Datenbank löschen und neu importieren (--create)
+su - osm
+osm2pgsql --create --slim -d gis -C 16000 --hstore --number-processes 8 --multi-geometry luxembourg-latest.osm.pbf
+
+# Dazu importieren (--append)
+su - osm
+osm2pgsql --append --slim -d gis -C 16000 --hstore --number-processes 8 --multi-geometry luxembourg-latest.osm.pbf
+
+
+
+# ----- CLEAR TILE CACHE
+
+rm -rf /var/lib/mod_tile/default/* ; /etc/init.d/renderd restart; /etc/init.d/apache2 restart
+
+# pre-render tiles:
+
+render_list --all --force --map=default -n 2 --socket=/var/run/renderd/renderd.sock  --min-zoom=1 --max-zoom=12
